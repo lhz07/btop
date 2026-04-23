@@ -17,6 +17,7 @@ tab-size = 4
 */
 
 #include <cmath>
+#include <cerrno>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -220,7 +221,11 @@ namespace Term {
 			size_t remaining = out.size();
 			while (remaining > 0) {
 				ssize_t written = ::write(STDOUT_FILENO, ptr, remaining);
-				if (written <= 0) break;
+				if (written < 0) {
+					if (errno == EINTR) continue; //? Retry on signal interruption
+					break; //? Unrecoverable error
+				}
+				if (written == 0) break; //? No progress possible
 				ptr += written;
 				remaining -= static_cast<size_t>(written);
 			}
