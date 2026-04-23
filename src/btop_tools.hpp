@@ -154,6 +154,12 @@ namespace Term {
 
 	//* Restore terminal options
 	void restore();
+
+	class ANSIOptimizer {
+	public:
+		//* Optimize ANSI output by removing redundant absolute-position redraw chunks
+		static string optimize(const string& ansi_output);
+	};
 }
 
 //? --------------------------------------------------- FUNCTIONS -----------------------------------------------------
