@@ -245,15 +245,28 @@ namespace Term {
 				}
 
 				const unsigned char c = static_cast<unsigned char>(input[i]);
+				//* Count only leading bytes of UTF-8 code points as visible characters.
 				if (c >= 0x20 and (c & 0xC0) != 0x80) chunk.visible_len++;
 				i++;
 			}
+		}
+
+		bool has_save_restore_cursor(const string& input) {
+			for (size_t i = 0; i + 2 < input.size(); i++) {
+				if (input[i] == '\x1b' and input[i + 1] == '[' and (input[i + 2] == 's' or input[i + 2] == 'u')) return true;
+			}
+			return false;
+		}
+
+		inline auto make_position_key(const int row, const int col) -> unsigned long long {
+			return (static_cast<unsigned long long>(static_cast<unsigned int>(row)) << 32)
+				| static_cast<unsigned int>(col);
 		}
 	}
 
 	string ANSIOptimizer::optimize(const string& ansi_output) {
 		if (ansi_output.empty()) return ansi_output;
-		if (ansi_output.find(Fx::e + "s") != string::npos or ansi_output.find(Fx::e + "u") != string::npos) return ansi_output;
+		if (has_save_restore_cursor(ansi_output)) return ansi_output;
 
 		vector<ANSIChunk> chunks;
 		chunks.reserve(128);
@@ -307,8 +320,7 @@ namespace Term {
 
 		for (size_t idx = 0; idx < chunks.size(); idx++) {
 			const auto& chunk = chunks[idx];
-			const auto key = (static_cast<unsigned long long>(static_cast<unsigned int>(chunk.row)) << 32)
-				| static_cast<unsigned int>(chunk.col);
+			const auto key = make_position_key(chunk.row, chunk.col);
 
 			if (const auto it = last_chunk_for_pos.find(key); it != last_chunk_for_pos.end()) {
 				auto& old_chunk = chunks[it->second];
