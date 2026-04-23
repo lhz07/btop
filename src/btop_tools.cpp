@@ -180,6 +180,170 @@ namespace Term {
 			initialized = false;
 		}
 	}
+
+	namespace {
+		struct ANSIChunk {
+			size_t start{};
+			size_t end{};
+			int row{};
+			int col{};
+			size_t visible_len{};
+			bool clears_line{};
+			bool dropped{};
+		};
+
+		bool parse_csi(const string& input, const size_t esc_pos, size_t& seq_end, string_view& params, char& final) {
+			if (esc_pos + 2 >= input.size() or input[esc_pos] != '\x1b' or input[esc_pos + 1] != '[') return false;
+			size_t i = esc_pos + 2;
+			while (i < input.size()) {
+				const unsigned char c = static_cast<unsigned char>(input[i]);
+				if (c >= 0x40 and c <= 0x7E) {
+					final = input[i];
+					params = string_view(input.data() + esc_pos + 2, i - (esc_pos + 2));
+					seq_end = i + 1;
+					return true;
+				}
+				i++;
+			}
+			return false;
+		}
+
+		auto parse_cursor_pos(const string_view params) -> std::pair<int, int> {
+			int row = 1;
+			int col = 1;
+			if (params.empty()) return {row, col};
+
+			const auto split_pos = params.find(';');
+			try {
+				if (split_pos == string_view::npos) {
+					row = std::max(1, std::stoi(string(params)));
+				}
+				else {
+					if (split_pos > 0) row = std::max(1, std::stoi(string(params.substr(0, split_pos))));
+					if (split_pos + 1 < params.size()) col = std::max(1, std::stoi(string(params.substr(split_pos + 1))));
+				}
+			}
+			catch (...) {}
+
+			return {row, col};
+		}
+
+		void analyze_chunk(ANSIChunk& chunk, const string& input) {
+			size_t i = chunk.start;
+			while (i < chunk.end) {
+				if (input[i] == '\x1b' and i + 1 < chunk.end and input[i + 1] == '[') {
+					size_t seq_end = i;
+					string_view params;
+					char final {};
+					if (parse_csi(input, i, seq_end, params, final)) {
+						if (final == 'K' and (params.empty() or params == "0" or params == "1" or params == "2")) {
+							chunk.clears_line = true;
+						}
+						i = seq_end;
+						continue;
+					}
+				}
+
+				const unsigned char c = static_cast<unsigned char>(input[i]);
+				//* Count only leading bytes of UTF-8 code points as visible characters.
+				if (c >= 0x20 and (c & 0xC0) != 0x80) chunk.visible_len++;
+				i++;
+			}
+		}
+
+		bool has_save_restore_cursor(const string& input) {
+			for (size_t i = 0; i < input.size(); i++) {
+				if (i + 2 >= input.size()) break;
+				if (input[i] == '\x1b' and input[i + 1] == '[' and (input[i + 2] == 's' or input[i + 2] == 'u')) return true;
+			}
+			return false;
+		}
+
+		inline auto make_position_key(const int row, const int col) -> unsigned long long {
+			return (static_cast<unsigned long long>(static_cast<unsigned int>(row)) << 32)
+				| static_cast<unsigned int>(col);
+		}
+	}
+
+	string ANSIOptimizer::optimize(const string& ansi_output) {
+		if (ansi_output.empty()) return ansi_output;
+		if (has_save_restore_cursor(ansi_output)) return ansi_output;
+
+		vector<ANSIChunk> chunks;
+		chunks.reserve(128);
+
+		size_t i = 0;
+		size_t prefix_end = ansi_output.size();
+		size_t current_start = string::npos;
+		int current_row = 1;
+		int current_col = 1;
+
+		while (i < ansi_output.size()) {
+			if (ansi_output[i] == '\x1b' and i + 1 < ansi_output.size() and ansi_output[i + 1] == '[') {
+				size_t seq_end = i;
+				string_view params;
+				char final {};
+				if (parse_csi(ansi_output, i, seq_end, params, final)) {
+					if (final == 'H' or final == 'f') {
+						if (prefix_end == ansi_output.size()) prefix_end = i;
+						if (current_start != string::npos and i > current_start) {
+							auto& chunk = chunks.emplace_back();
+							chunk.start = current_start;
+							chunk.end = i;
+							chunk.row = current_row;
+							chunk.col = current_col;
+							analyze_chunk(chunk, ansi_output);
+						}
+						std::tie(current_row, current_col) = parse_cursor_pos(params);
+						current_start = i;
+					}
+					i = seq_end;
+					continue;
+				}
+			}
+			i++;
+		}
+
+		if (current_start != string::npos and ansi_output.size() > current_start) {
+			auto& chunk = chunks.emplace_back();
+			chunk.start = current_start;
+			chunk.end = ansi_output.size();
+			chunk.row = current_row;
+			chunk.col = current_col;
+			analyze_chunk(chunk, ansi_output);
+		}
+
+		if (chunks.size() < 2) return ansi_output;
+
+		std::unordered_map<unsigned long long, size_t> last_chunk_for_pos;
+		last_chunk_for_pos.reserve(chunks.size());
+		bool changed = false;
+
+		for (size_t idx = 0; idx < chunks.size(); idx++) {
+			const auto& chunk = chunks[idx];
+			const auto key = make_position_key(chunk.row, chunk.col);
+
+			if (const auto it = last_chunk_for_pos.find(key); it != last_chunk_for_pos.end()) {
+				auto& old_chunk = chunks[it->second];
+				if (chunk.clears_line or chunk.visible_len >= old_chunk.visible_len) {
+					old_chunk.dropped = true;
+					changed = true;
+				}
+			}
+			last_chunk_for_pos[key] = idx;
+		}
+
+		if (not changed) return ansi_output;
+
+		string optimized;
+		optimized.reserve(ansi_output.size());
+		if (prefix_end > 0 and prefix_end <= ansi_output.size()) optimized.append(ansi_output, 0, prefix_end);
+		for (const auto& chunk : chunks) {
+			if (not chunk.dropped) optimized.append(ansi_output, chunk.start, chunk.end - chunk.start);
+		}
+
+		return optimized;
+	}
 }
 
 //? --------------------------------------------------- FUNCTIONS -----------------------------------------------------
