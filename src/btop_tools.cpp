@@ -180,6 +180,52 @@ namespace Term {
 			initialized = false;
 		}
 	}
+
+	void OutputBuffer::append(const std::string& data) {
+		std::lock_guard<std::mutex> lock(mtx);
+		buffer += data;
+	}
+
+	std::string OutputBuffer::get_content() const {
+		std::lock_guard<std::mutex> lock(mtx);
+		return buffer;
+	}
+
+	void OutputBuffer::clear() noexcept {
+		std::lock_guard<std::mutex> lock(mtx);
+		buffer.clear();
+	}
+
+	void OutputBuffer::flush_atomic() {
+		//? Static mutex shared across all OutputBuffer instances to serialise writes to stdout,
+		//? preventing interleaving between the runner thread and main-thread overlay/clock writes.
+		static std::mutex write_mtx;
+
+		std::string local_buf;
+		{
+			std::lock_guard<std::mutex> lock(mtx);
+			local_buf = std::move(buffer);
+		}
+
+		const bool term_sync = Config::getB("terminal_sync");
+		std::string out;
+		out.reserve(local_buf.size() + (term_sync ? sync_start.size() + sync_end.size() : 0));
+		if (term_sync) out += sync_start;
+		out += local_buf;
+		if (term_sync) out += sync_end;
+
+		if (not out.empty()) {
+			std::lock_guard<std::mutex> write_lock(write_mtx);
+			const char* ptr = out.data();
+			size_t remaining = out.size();
+			while (remaining > 0) {
+				ssize_t written = ::write(STDOUT_FILENO, ptr, remaining);
+				if (written <= 0) break;
+				ptr += written;
+				remaining -= static_cast<size_t>(written);
+			}
+		}
+	}
 }
 
 //? --------------------------------------------------- FUNCTIONS -----------------------------------------------------

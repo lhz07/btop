@@ -393,7 +393,7 @@ namespace Runner {
 		gain_priv& operator=(gain_priv&& other) = delete;
 	};
 
-	string output;
+	Term::OutputBuffer output_buffer;
 	string empty_bg;
 	bool pause_output{};
 	sigset_t mask;
@@ -509,7 +509,7 @@ namespace Runner {
 				debug_times["total"] = {0, 0};
 			}
 
-			output.clear();
+			output_buffer.clear();
 
 			//* Run collection and draw functions for all boxes
 			try {
@@ -556,14 +556,14 @@ namespace Runner {
 
 						//? Draw box
 						if (not pause_output) {
-							output += Cpu::draw(
+							output_buffer.append(Cpu::draw(
 								cpu,
 #if defined(GPU_SUPPORT)
 								gpus_ref,
 #endif // GPU_SUPPORT
 								conf.force_redraw,
 								conf.no_update
-							);
+							));
 						}
 
 						if (Global::debug) debug_timer("cpu", draw_done);
@@ -581,7 +581,7 @@ namespace Runner {
 						//? Draw box
 						if (not pause_output)
 							for (unsigned long i = 0; i < gpu_panels.size(); ++i)
-								output += Gpu::draw(gpus_ref[gpu_panels[i]], i, conf.force_redraw, conf.no_update);
+								output_buffer.append(Gpu::draw(gpus_ref[gpu_panels[i]], i, conf.force_redraw, conf.no_update));
 
 						if (Global::debug) debug_timer("gpu", draw_done);
 					}
@@ -601,7 +601,7 @@ namespace Runner {
 						if (Global::debug) debug_timer("mem", draw_begin);
 
 						//? Draw box
-						if (not pause_output) output += Mem::draw(mem, conf.force_redraw, conf.no_update);
+						if (not pause_output) output_buffer.append(Mem::draw(mem, conf.force_redraw, conf.no_update));
 
 						if (Global::debug) debug_timer("mem", draw_done);
 					}
@@ -621,7 +621,7 @@ namespace Runner {
 						if (Global::debug) debug_timer("net", draw_begin);
 
 						//? Draw box
-						if (not pause_output) output += Net::draw(net, conf.force_redraw, conf.no_update);
+						if (not pause_output) output_buffer.append(Net::draw(net, conf.force_redraw, conf.no_update));
 
 						if (Global::debug) debug_timer("net", draw_done);
 					}
@@ -641,7 +641,7 @@ namespace Runner {
 						if (Global::debug) debug_timer("proc", draw_begin);
 
 						//? Draw box
-						if (not pause_output) output += Proc::draw(proc, conf.force_redraw, conf.no_update);
+						if (not pause_output) output_buffer.append(Proc::draw(proc, conf.force_redraw, conf.no_update));
 
 						if (Global::debug) debug_timer("proc", draw_done);
 					}
@@ -667,12 +667,12 @@ namespace Runner {
 				redraw = false;
 			}
 
-			if (not pause_output) output += conf.clock;
+			if (not pause_output) output_buffer.append(conf.clock);
 			if (not conf.overlay.empty() and not conf.background_update) pause_output = true;
-			if (output.empty() and not pause_output) {
+			if (output_buffer.get_content().empty() and not pause_output) {
 				if (empty_bg.empty()) {
 					const int x = Term::width / 2 - 10, y = Term::height / 2 - 10;
-					output += Term::clear;
+					output_buffer.append(Term::clear);
 					empty_bg = fmt::format(
 						"{banner}"
 						"{mv1}{titleFg}{b}No boxes shown!"
@@ -695,16 +695,16 @@ namespace Runner {
 						"mv8"_a = Mv::to(y+14, x)
 					);
 				}
-				output += empty_bg;
+				output_buffer.append(empty_bg);
 			}
 
 			//! DEBUG stats -->
 			if (Global::debug and not Menu::active) {
-				output += fmt::format("{pre}{box:5.5} {collect:>12.12} {draw:>12.12}{post}",
+				output_buffer.append(fmt::format("{pre}{box:5.5} {collect:>12.12} {draw:>12.12}{post}",
 					"pre"_a = debug_bg + Theme::c("title") + Fx::b,
 					"box"_a = "box", "collect"_a = "collect", "draw"_a = "draw",
 					"post"_a = Theme::c("main_fg") + Fx::ub
-				);
+				));
 				static auto loc = std::locale(std::locale::classic(), new MyNumPunct);
 			#ifdef GPU_SUPPORT
 				for (const string name : {"cpu", "mem", "net", "proc", "gpu", "total"}) {
@@ -713,22 +713,25 @@ namespace Runner {
 			#endif
 					if (not debug_times.contains(name)) debug_times[name] = {0,0};
 					const auto& [time_collect, time_draw] = debug_times.at(name);
-					if (name == "total") output += Fx::b;
-					output += fmt::format(loc, "{mvLD}{name:5.5} {collect:12L} {draw:12L}",
+					if (name == "total") output_buffer.append(Fx::b);
+					output_buffer.append(fmt::format(loc, "{mvLD}{name:5.5} {collect:12L} {draw:12L}",
 						"mvLD"_a = Mv::l(31) + Mv::d(1),
 						"name"_a = name,
 						"collect"_a = time_collect,
 						"draw"_a = time_draw
-					);
+					));
 				}
 			}
 
-			//? If overlay isn't empty, print output without color and then print overlay on top
-			const bool term_sync = Config::getB("terminal_sync");
-			cout << (term_sync ? Term::sync_start : "") << (conf.overlay.empty()
-					? output
-					: (output.empty() ? "" : Fx::ub + Theme::c("inactive_fg") + Fx::uncolor(output)) + conf.overlay)
-				<< (term_sync ? Term::sync_end : "") << flush;
+			//? If overlay isn't empty, combine decolorized output with overlay before atomic flush
+			if (not conf.overlay.empty()) {
+				const string bg = output_buffer.get_content();
+				output_buffer.clear();
+				if (not bg.empty())
+					output_buffer.append(Fx::ub + Theme::c("inactive_fg") + Fx::uncolor(bg));
+				output_buffer.append(conf.overlay);
+			}
+			output_buffer.flush_atomic();
 		}
 		//* ----------------------------------------------- THREAD LOOP -----------------------------------------------
 		return {};
@@ -759,12 +762,14 @@ namespace Runner {
 		if (stopping or Global::resized) return;
 
 		if (box == "overlay") {
-			const bool term_sync = Config::getB("terminal_sync");
-			cout << (term_sync ? Term::sync_start : "") << Global::overlay << (term_sync ? Term::sync_end : "") << flush;
+			Term::OutputBuffer buf;
+			buf.append(Global::overlay);
+			buf.flush_atomic();
 		}
 		else if (box == "clock") {
-			const bool term_sync = Config::getB("terminal_sync");
-			cout << (term_sync ? Term::sync_start : "") << Global::clock << (term_sync ? Term::sync_end : "") << flush;
+			Term::OutputBuffer buf;
+			buf.append(Global::clock);
+			buf.flush_atomic();
 		}
 		else {
 			Config::unlock();

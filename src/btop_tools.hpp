@@ -29,6 +29,7 @@ tab-size = 4
 #include <cstdint>
 #include <filesystem>
 #include <limits.h>
+#include <mutex>
 #include <ranges>
 #include <regex>
 #include <string>
@@ -154,6 +155,32 @@ namespace Term {
 
 	//* Restore terminal options
 	void restore();
+
+	//* Thread-safe output buffer for atomic terminal writes.
+	//* Accumulates render data and flushes to stdout in a single write() syscall,
+	//* preventing partial-frame rendering visible in tmux and similar multiplexers.
+	class OutputBuffer {
+	private:
+		std::string buffer;
+		mutable std::mutex mtx;
+
+	public:
+		OutputBuffer() = default;
+
+		//* Thread-safe append to buffer
+		void append(const std::string& data);
+
+		//* Get current buffer content
+		std::string get_content() const;
+
+		//* Clear the buffer
+		void clear() noexcept;
+
+		//* Atomically write buffer to stdout wrapped in sync sequences, then clear.
+		//* Uses a single write() syscall shared across all OutputBuffer instances to
+		//* prevent interleaving with other concurrent writes.
+		void flush_atomic();
+	};
 }
 
 //? --------------------------------------------------- FUNCTIONS -----------------------------------------------------
