@@ -252,7 +252,8 @@ namespace Term {
 		}
 
 		bool has_save_restore_cursor(const string& input) {
-			for (size_t i = 0; i + 2 < input.size(); i++) {
+			for (size_t i = 0; i < input.size(); i++) {
+				if (i + 2 >= input.size()) break;
 				if (input[i] == '\x1b' and input[i + 1] == '[' and (input[i + 2] == 's' or input[i + 2] == 'u')) return true;
 			}
 			return false;

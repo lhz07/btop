@@ -37,7 +37,7 @@ TEST(term, ansi_optimizer_keeps_shorter_overwrite_without_clear) {
 
 TEST(term, ansi_optimizer_collapses_clear_then_redraw) {
 	const std::string esc = "\x1b[";
-	const std::string input = esc + "3;4fABCDE" + esc + "3;4f\x1b[2K" + esc + "3;4fNEW";
+	const std::string input = esc + "3;4fABCDE" + esc + "3;4f" + esc + "2K" + esc + "3;4fNEW";
 	const std::string expected = esc + "3;4fNEW";
 	EXPECT_EQ(Term::ANSIOptimizer::optimize(input), expected);
 }
